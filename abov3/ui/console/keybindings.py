@@ -149,7 +149,7 @@ def _add_common_bindings(kb: KeyBindings, enable_system_prompt: bool = True):
         if data:
             event.app.clipboard.set_data(data)
     
-    @kb.add('m-w', filter=has_selection)
+    @kb.add('escape', 'w', filter=has_selection)
     def copy_selection(event: KeyPressEvent):
         """Copy selected text."""
         data = event.current_buffer.copy_selection()
@@ -223,12 +223,12 @@ def _add_emacs_bindings(kb: KeyBindings):
         """Move backward one character."""
         event.current_buffer.cursor_left()
     
-    @kb.add('m-f')
+    @kb.add('escape', 'f')
     def forward_word(event: KeyPressEvent):
         """Move forward one word."""
         event.current_buffer.cursor_right(count=event.current_buffer.document.find_next_word_ending())
     
-    @kb.add('m-b')
+    @kb.add('escape', 'b')
     def backward_word(event: KeyPressEvent):
         """Move backward one word."""
         event.current_buffer.cursor_left(count=-event.current_buffer.document.find_previous_word_beginning())
@@ -246,13 +246,13 @@ def _add_emacs_bindings(kb: KeyBindings):
         deleted = event.current_buffer.delete(count=event.current_buffer.document.get_start_of_line_position())
         event.app.clipboard.set_data(ClipboardData(deleted))
     
-    @kb.add('m-d')
+    @kb.add('escape', 'd')
     def kill_word(event: KeyPressEvent):
         """Kill word forward."""
         deleted = event.current_buffer.delete_word()
         event.app.clipboard.set_data(ClipboardData(deleted))
     
-    @kb.add('m-backspace')
+    @kb.add('escape', 'backspace')
     def kill_word_backwards(event: KeyPressEvent):
         """Kill word backward."""
         deleted = event.current_buffer.delete_word(before=True)
@@ -263,27 +263,27 @@ def _add_emacs_bindings(kb: KeyBindings):
         """Transpose characters."""
         event.current_buffer.transpose_chars()
     
-    @kb.add('m-t')
+    @kb.add('escape', 't')
     def transpose_words(event: KeyPressEvent):
         """Transpose words."""
         # Custom implementation needed
         pass
     
-    @kb.add('m-u')
+    @kb.add('escape', 'u')
     def uppercase_word(event: KeyPressEvent):
         """Uppercase word."""
         for _ in range(event.current_buffer.document.find_next_word_ending() or 1):
             event.current_buffer.transform_current_char(str.upper)
             event.current_buffer.cursor_right()
     
-    @kb.add('m-l')
+    @kb.add('escape', 'l')
     def lowercase_word(event: KeyPressEvent):
         """Lowercase word."""
         for _ in range(event.current_buffer.document.find_next_word_ending() or 1):
             event.current_buffer.transform_current_char(str.lower)
             event.current_buffer.cursor_right()
     
-    @kb.add('m-c')
+    @kb.add('escape', 'c')
     def capitalize_word(event: KeyPressEvent):
         """Capitalize word."""
         pos = event.current_buffer.document.find_next_word_ending()
