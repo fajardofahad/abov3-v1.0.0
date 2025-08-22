@@ -379,10 +379,10 @@ class ABOV3REPL:
         self.output_formatter = OutputFormatter(self.console)
         self.streaming_formatter = StreamingFormatter(self.console)
         
-        # Setup components
+        # Setup components (order is important!)
         self._setup_history()
+        self._setup_style()  # Must come before _setup_session()
         self._setup_session()
-        self._setup_style()
     
     def _setup_history(self):
         """Setup command history."""
@@ -402,6 +402,10 @@ class ABOV3REPL:
             self.config.key_binding_mode,
             enable_vim=self.config.enable_vim_mode
         )
+        
+        # Ensure style is available (safety check)
+        if not hasattr(self, 'style') or self.style is None:
+            self._setup_style()
         
         # Create the prompt session
         self.session = PromptSession(
@@ -424,28 +428,47 @@ class ABOV3REPL:
     
     def _setup_style(self):
         """Setup the color style."""
+        # Always initialize with a fallback style first
+        default_style = Style.from_dict({
+            'completion-menu.completion': 'bg:#008888 #ffffff',
+            'completion-menu.completion.current': 'bg:#00aaaa #000000',
+            'scrollbar.background': 'bg:#88aaaa',
+            'scrollbar.button': 'bg:#222222',
+            'prompt': 'cyan bold',
+            'continuation': 'cyan',
+        })
+        
         try:
+            # Try to load the configured theme
             pygments_style = get_style_by_name(self.config.theme)
             self.style = Style.from_pygments_cls(pygments_style)
-        except:
-            # Fallback to default style
-            self.style = Style.from_dict({
-                'completion-menu.completion': 'bg:#008888 #ffffff',
-                'completion-menu.completion.current': 'bg:#00aaaa #000000',
-                'scrollbar.background': 'bg:#88aaaa',
-                'scrollbar.button': 'bg:#222222',
-            })
+        except Exception as e:
+            # Log the error if debug mode is enabled
+            if hasattr(self, 'debug_mode') and self.debug_mode:
+                print(f"Warning: Failed to load theme '{self.config.theme}': {e}")
+            # Use fallback style
+            self.style = default_style
+            # Reset theme to a known working one
+            self.config.theme = "default"
     
     def set_theme(self, theme_name: str):
         """Change the color theme."""
         try:
+            # Validate the theme exists first
             pygments_style = get_style_by_name(theme_name)
-            self.style = Style.from_pygments_cls(pygments_style)
+            new_style = Style.from_pygments_cls(pygments_style)
+            
+            # Only update if successful
+            self.style = new_style
             self.config.theme = theme_name
+            
+            # Update the session if it exists
             if self.session:
                 self.session.style = self.style
+                
         except Exception as e:
-            raise ValueError(f"Invalid theme: {theme_name}") from e
+            # Don't change anything if theme is invalid
+            raise ValueError(f"Invalid theme: {theme_name}. Available themes include: monokai, github, solarized, material, dracula") from e
     
     def update_keybindings(self):
         """Update key bindings based on current configuration."""
