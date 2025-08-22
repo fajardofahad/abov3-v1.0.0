@@ -352,13 +352,45 @@ class OllamaClient:
                 response = await self._client.list()
                 models = []
                 
-                for model_data in response.get("models", []):
+                # Handle the ollama library's ListResponse object
+                if hasattr(response, 'models'):
+                    # It's a ListResponse object from the ollama library
+                    model_list = response.models
+                else:
+                    # Fallback for dict response (shouldn't happen with current library)
+                    model_list = response.get("models", []) if isinstance(response, dict) else []
+                
+                for model_data in model_list:
+                    # The ollama library returns Model objects with 'model' attribute (not 'name')
+                    if hasattr(model_data, 'model'):
+                        # It's an ollama Model object
+                        name = model_data.model  # Note: attribute is 'model' not 'name'
+                        size = model_data.size if hasattr(model_data, 'size') else 0
+                        modified_at = str(model_data.modified_at) if hasattr(model_data, 'modified_at') else ""
+                        digest = model_data.digest if hasattr(model_data, 'digest') else ""
+                        
+                        # Handle details which is a ModelDetails object
+                        details = {}
+                        if hasattr(model_data, 'details'):
+                            details_obj = model_data.details
+                            if hasattr(details_obj, '__dict__'):
+                                details = details_obj.__dict__
+                            elif isinstance(details_obj, dict):
+                                details = details_obj
+                    else:
+                        # Handle dict format (fallback for compatibility)
+                        name = model_data.get("name", model_data.get("model", "unknown"))
+                        size = model_data.get("size", 0)
+                        modified_at = model_data.get("modified_at", "")
+                        digest = model_data.get("digest", "")
+                        details = model_data.get("details", {})
+                    
                     model_info = ModelInfo(
-                        name=model_data["name"],
-                        size=model_data.get("size", 0),
-                        modified_at=model_data.get("modified_at", ""),
-                        digest=model_data.get("digest", ""),
-                        details=model_data.get("details", {}),
+                        name=name,
+                        size=size,
+                        modified_at=modified_at,
+                        digest=digest,
+                        details=details,
                     )
                     models.append(model_info)
                     self._available_models[model_info.name] = model_info

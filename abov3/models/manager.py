@@ -291,18 +291,33 @@ class ModelManager:
             # Convert to enhanced ModelInfo objects
             models = []
             for ollama_model in ollama_models:
+                # Handle both dict and object formats
+                if hasattr(ollama_model, 'name'):
+                    name = ollama_model.name
+                    size = ollama_model.size
+                    digest = ollama_model.digest
+                    modified_at = ollama_model.modified_at
+                    details = ollama_model.details if hasattr(ollama_model, 'details') else {}
+                else:
+                    # Handle dict format
+                    name = ollama_model.get('name', 'unknown')
+                    size = ollama_model.get('size', 0)
+                    digest = ollama_model.get('digest', '')
+                    modified_at = ollama_model.get('modified_at', '')
+                    details = ollama_model.get('details', {})
+                
                 model_info = ModelInfo(
-                    name=ollama_model.name,
-                    tag=ollama_model.name.split(':')[-1] if ':' in ollama_model.name else 'latest',
-                    full_name=ollama_model.name,
-                    size=ollama_model.size,
-                    digest=ollama_model.digest,
-                    modified_at=datetime.fromisoformat(ollama_model.modified_at) 
-                              if isinstance(ollama_model.modified_at, str) 
-                              else ollama_model.modified_at,
-                    parameter_count=ollama_model.details.get('parameter_size'),
-                    quantization=ollama_model.details.get('quantization_level'),
-                    architecture=ollama_model.details.get('family')
+                    name=name,
+                    tag=name.split(':')[-1] if ':' in name else 'latest',
+                    full_name=name,
+                    size=size,
+                    digest=digest,
+                    modified_at=datetime.fromisoformat(modified_at) 
+                              if isinstance(modified_at, str) and modified_at
+                              else datetime.now(),
+                    parameter_count=details.get('parameter_size') if details else None,
+                    quantization=details.get('quantization_level') if details else None,
+                    architecture=details.get('family') if details else None
                 )
                 models.append(model_info)
             
@@ -546,6 +561,158 @@ class ModelManager:
                 return loop.run_until_complete(self.model_exists(model_name))
         except Exception:
             # If there's any issue checking, assume model is not available
+            return False
+    
+    def list_models_sync(self, force_refresh: bool = False) -> List[ModelInfo]:
+        """
+        List all available models (synchronous wrapper for list_models).
+        
+        Args:
+            force_refresh: Force refresh from Ollama API
+            
+        Returns:
+            List of ModelInfo objects
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an async context, create a new event loop
+                import threading
+                result = []
+                def run_async():
+                    nonlocal result
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        result = new_loop.run_until_complete(self.list_models(force_refresh))
+                    finally:
+                        new_loop.close()
+                
+                thread = threading.Thread(target=run_async)
+                thread.start()
+                thread.join()
+                return result
+            else:
+                return loop.run_until_complete(self.list_models(force_refresh))
+        except Exception as e:
+            logger.error(f"Error in sync list_models: {e}")
+            return []
+    
+    def get_model_info_sync(self, model_name: str, detailed: bool = True) -> Optional[ModelInfo]:
+        """
+        Get detailed information about a specific model (synchronous wrapper).
+        
+        Args:
+            model_name: Name of the model
+            detailed: Whether to fetch detailed information
+            
+        Returns:
+            ModelInfo object or None if not found
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an async context, create a new event loop
+                import threading
+                result = None
+                def run_async():
+                    nonlocal result
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        result = new_loop.run_until_complete(self.get_model_info(model_name, detailed))
+                    finally:
+                        new_loop.close()
+                
+                thread = threading.Thread(target=run_async)
+                thread.start()
+                thread.join()
+                return result
+            else:
+                return loop.run_until_complete(self.get_model_info(model_name, detailed))
+        except Exception as e:
+            logger.error(f"Error in sync get_model_info: {e}")
+            return None
+    
+    def install_model_sync(self, model_name: str, 
+                          progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+                          user_id: Optional[str] = None) -> bool:
+        """
+        Install a model (synchronous wrapper for install_model).
+        
+        Args:
+            model_name: Name of the model to install
+            progress_callback: Optional callback for progress updates
+            user_id: User ID for security logging
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an async context, create a new event loop
+                import threading
+                result = False
+                def run_async():
+                    nonlocal result
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        result = new_loop.run_until_complete(
+                            self.install_model(model_name, progress_callback, user_id)
+                        )
+                    finally:
+                        new_loop.close()
+                
+                thread = threading.Thread(target=run_async)
+                thread.start()
+                thread.join()
+                return result
+            else:
+                return loop.run_until_complete(self.install_model(model_name, progress_callback, user_id))
+        except Exception as e:
+            logger.error(f"Error in sync install_model: {e}")
+            return False
+    
+    def remove_model_sync(self, model_name: str, user_id: Optional[str] = None) -> bool:
+        """
+        Remove a model (synchronous wrapper for remove_model).
+        
+        Args:
+            model_name: Name of the model to remove
+            user_id: User ID for security logging
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an async context, create a new event loop
+                import threading
+                result = False
+                def run_async():
+                    nonlocal result
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        result = new_loop.run_until_complete(self.remove_model(model_name, user_id))
+                    finally:
+                        new_loop.close()
+                
+                thread = threading.Thread(target=run_async)
+                thread.start()
+                thread.join()
+                return result
+            else:
+                return loop.run_until_complete(self.remove_model(model_name, user_id))
+        except Exception as e:
+            logger.error(f"Error in sync remove_model: {e}")
             return False
     
     async def check_model_health(self, model_name: str) -> ModelHealthStatus:

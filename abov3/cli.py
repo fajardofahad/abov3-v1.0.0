@@ -520,7 +520,7 @@ def list(ctx: click.Context, format: str):
     
     try:
         model_manager = ModelManager(config)
-        models = model_manager.list_models()
+        models = model_manager.list_models_sync()
         
         if format == "json":
             import json
@@ -574,9 +574,13 @@ def install(ctx: click.Context, model_name: str, progress: bool):
             def progress_callback(status):
                 console.print(f"Status: {status}")
             
-            model_manager.install_model(model_name, progress_callback)
+            success = model_manager.install_model_sync(model_name, progress_callback)
+            if not success:
+                raise CLIError(f"Failed to install model {model_name}")
         else:
-            model_manager.install_model(model_name)
+            success = model_manager.install_model_sync(model_name)
+            if not success:
+                raise CLIError(f"Failed to install model {model_name}")
         
         console.print(f"[green]OK[/green] Model [cyan]{model_name}[/cyan] installed successfully")
         
@@ -607,7 +611,9 @@ def remove(ctx: click.Context, model_name: str, confirm: bool):
     
     try:
         model_manager = ModelManager(config)
-        model_manager.remove_model(model_name)
+        success = model_manager.remove_model_sync(model_name)
+        if not success:
+            raise CLIError(f"Failed to remove model {model_name}")
         
         console.print(f"[green]OK[/green] Model [cyan]{model_name}[/cyan] removed successfully")
         
@@ -628,7 +634,7 @@ def info(ctx: click.Context, model_name: str):
     
     try:
         model_manager = ModelManager(config)
-        info = model_manager.get_model_info(model_name)
+        info = model_manager.get_model_info_sync(model_name)
         
         table = Table(title=f"Model Information: {model_name}")
         table.add_column("Property", style="cyan")

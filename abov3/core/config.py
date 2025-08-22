@@ -22,6 +22,7 @@ class OllamaConfig(BaseModel):
     timeout: int = Field(default=120, description="Request timeout in seconds")
     verify_ssl: bool = Field(default=True, description="Verify SSL certificates")
     max_retries: int = Field(default=3, description="Maximum number of retries")
+    required_for_startup: bool = Field(default=False, description="Whether Ollama is required for application startup")
     
     @validator("host")
     def validate_host(cls, v: str) -> str:

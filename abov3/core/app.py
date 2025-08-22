@@ -41,6 +41,7 @@ class AppState(Enum):
     INITIALIZING = "initializing"
     STARTING = "starting"
     RUNNING = "running"
+    DEGRADED = "degraded"  # Some services failed but core functionality works
     STOPPING = "stopping"
     STOPPED = "stopped"
     ERROR = "error"
@@ -56,6 +57,8 @@ class AppMetrics:
     active_sessions: int = 0
     uptime_seconds: float = 0.0
     memory_usage_mb: float = 0.0
+    failed_components: List[str] = field(default_factory=list)
+    degraded_features: List[str] = field(default_factory=list)
     
     def get_uptime(self) -> float:
         """Get current uptime in seconds."""
@@ -101,6 +104,9 @@ class ABOV3App:
         self._shutdown_event = asyncio.Event()
         self._background_tasks: List[asyncio.Task] = []
         self._cleanup_callbacks: List[Callable] = []
+        self._component_health: Dict[str, bool] = {}
+        self._startup_timeout = 30.0  # 30 seconds startup timeout
+        self._health_check_timeout = 5.0  # 5 seconds per health check
         
         # Logging setup
         self._setup_logging()
@@ -179,52 +185,173 @@ class ABOV3App:
     
     async def startup(self) -> None:
         """
-        Initialize all application subsystems.
+        Initialize all application subsystems with resilient startup logic.
+        
+        Supports degraded mode where the app can start even if some
+        non-critical components fail.
         
         Raises:
-            RuntimeError: If initialization fails
+            RuntimeError: If critical initialization fails
         """
+        startup_start = time.time()
+        
         try:
             self.state = AppState.STARTING
             self.logger.info("Starting ABOV3 application...")
             
-            # Initialize core components
-            await self._initialize_ollama_client()
-            await self._initialize_context_manager()
-            await self._initialize_model_manager()
-            await self._initialize_security_manager()
+            # Initialize components with timeout and error handling
+            self._report_startup_progress("Initializing components...")
+            components_status = await self._initialize_components_resilient()
             
-            # Initialize REPL if in interactive mode
-            if self.interactive:
-                await self._initialize_repl()
+            # Report component status
+            self._report_component_status(components_status)
             
-            # Start background tasks
-            await self._start_background_tasks()
+            # Check if we have minimum required components for basic operation
+            # For now, we allow the app to start even without Ollama in degraded mode
+            # Only completely fail if ALL components are broken
+            all_failed = all(not status for status in components_status.values())
             
-            # Perform health checks
-            await self._initial_health_checks()
+            if all_failed:
+                self.state = AppState.ERROR
+                error_msg = "All components failed to initialize"
+                self.logger.error(error_msg)
+                self._report_startup_progress(f"FAILED - {error_msg}", is_error=True)
+                raise RuntimeError(error_msg)
             
-            self.state = AppState.RUNNING
+            # Start background tasks (non-blocking)
+            self._report_startup_progress("Starting background tasks...")
+            self._start_background_tasks_non_blocking()
+            
+            # Determine final state
+            failed_components = [name for name, status in components_status.items() if not status]
+            if failed_components:
+                self.state = AppState.DEGRADED
+                self.metrics.failed_components = failed_components
+                self.logger.warning(f"Application started in degraded mode. Failed components: {failed_components}")
+                self._report_startup_progress(f"Started in DEGRADED mode - some components failed: {', '.join(failed_components)}", is_error=False)
+            else:
+                self.state = AppState.RUNNING
+                self.logger.info("ABOV3 application started successfully - all components healthy")
+                self._report_startup_progress("Successfully started - all components healthy")
+            
             self.metrics.start_time = datetime.now()
             
-            self.logger.info("ABOV3 application started successfully")
-            
+            # Display banner with status
             if self.interactive:
                 self._display_startup_banner()
         
         except Exception as e:
             self.state = AppState.ERROR
-            self.logger.error(f"Failed to start ABOV3 application: {e}")
+            elapsed = time.time() - startup_start
+            self.logger.error(f"Failed to start ABOV3 application after {elapsed:.2f}s: {e}")
             raise RuntimeError(f"Application startup failed: {e}") from e
     
+    async def _initialize_components_resilient(self) -> Dict[str, bool]:
+        """
+        Initialize all components with error handling and timeouts.
+        
+        Returns:
+            Dictionary mapping component names to initialization success status
+        """
+        components_status = {}
+        
+        # Define component initialization tasks
+        component_tasks = [
+            ('ollama_client', self._initialize_ollama_client_safe()),
+            ('context_manager', self._initialize_context_manager_safe()),
+            ('model_manager', self._initialize_model_manager_safe()),
+            ('security_manager', self._initialize_security_manager_safe()),
+        ]
+        
+        # Add REPL if in interactive mode
+        if self.interactive:
+            component_tasks.append(('repl', self._initialize_repl_safe()))
+        
+        # Initialize components concurrently with timeout
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*[task for _, task in component_tasks], return_exceptions=True),
+                timeout=self._startup_timeout
+            )
+            
+            # Process results
+            for i, (component_name, _) in enumerate(component_tasks):
+                result = results[i]
+                if isinstance(result, Exception):
+                    self.logger.error(f"Failed to initialize {component_name}: {result}")
+                    components_status[component_name] = False
+                    self._component_health[component_name] = False
+                else:
+                    components_status[component_name] = result
+                    self._component_health[component_name] = result
+                    if result:
+                        self.logger.info(f"{component_name} initialized successfully")
+                    else:
+                        self.logger.warning(f"{component_name} initialization failed")
+        
+        except asyncio.TimeoutError:
+            self.logger.error(f"Component initialization timed out after {self._startup_timeout}s")
+            # Mark all unfinished components as failed
+            for component_name, _ in component_tasks:
+                if component_name not in components_status:
+                    components_status[component_name] = False
+                    self._component_health[component_name] = False
+        
+        return components_status
+    
+    async def _initialize_ollama_client_safe(self) -> bool:
+        """Safe initialization of Ollama client with timeout."""
+        try:
+            await asyncio.wait_for(self._initialize_ollama_client(), timeout=10.0)
+            return True
+        except Exception as e:
+            self.logger.error(f"Ollama client initialization failed: {e}")
+            return False
+    
+    async def _initialize_context_manager_safe(self) -> bool:
+        """Safe initialization of context manager."""
+        try:
+            await self._initialize_context_manager()
+            return True
+        except Exception as e:
+            self.logger.error(f"Context manager initialization failed: {e}")
+            return False
+    
+    async def _initialize_model_manager_safe(self) -> bool:
+        """Safe initialization of model manager."""
+        try:
+            await self._initialize_model_manager()
+            return True
+        except Exception as e:
+            self.logger.error(f"Model manager initialization failed: {e}")
+            return False
+    
+    async def _initialize_security_manager_safe(self) -> bool:
+        """Safe initialization of security manager."""
+        try:
+            await self._initialize_security_manager()
+            return True
+        except Exception as e:
+            self.logger.error(f"Security manager initialization failed: {e}")
+            return False
+    
+    async def _initialize_repl_safe(self) -> bool:
+        """Safe initialization of REPL interface."""
+        try:
+            await self._initialize_repl()
+            return True
+        except Exception as e:
+            self.logger.error(f"REPL initialization failed: {e}")
+            return False
+
     async def _initialize_ollama_client(self) -> None:
-        """Initialize the Ollama API client."""
+        """Initialize the Ollama API client with timeout and retry."""
         self.logger.debug("Initializing Ollama client...")
         
         retry_config = RetryConfig(
             max_retries=self.config.ollama.max_retries,
             base_delay=1.0,
-            max_delay=30.0
+            max_delay=10.0  # Reduced for faster startup
         )
         
         self.ollama_client = OllamaClient(
@@ -232,11 +359,31 @@ class ABOV3App:
             retry_config=retry_config
         )
         
-        # Test connection
-        if not await self.ollama_client.health_check():
-            raise ConnectionError("Cannot connect to Ollama server")
+        # Test connection with timeout and retries
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                self.logger.debug(f"Testing Ollama connection (attempt {attempt + 1}/{max_attempts})...")
+                healthy = await asyncio.wait_for(
+                    self.ollama_client.health_check(), 
+                    timeout=self._health_check_timeout
+                )
+                if healthy:
+                    self.logger.info("Ollama client initialized and connected successfully")
+                    return
+                else:
+                    self.logger.warning(f"Ollama health check failed (attempt {attempt + 1})")
+            except asyncio.TimeoutError:
+                self.logger.warning(f"Ollama health check timed out (attempt {attempt + 1})")
+            except Exception as e:
+                self.logger.warning(f"Ollama connection test failed (attempt {attempt + 1}): {e}")
+            
+            # Wait before retry (except on last attempt)
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(1.0)
         
-        self.logger.info("Ollama client initialized successfully")
+        # If we get here, all attempts failed
+        raise ConnectionError(f"Cannot connect to Ollama server after {max_attempts} attempts")
     
     async def _initialize_context_manager(self) -> None:
         """Initialize the context manager."""
@@ -316,35 +463,103 @@ class ABOV3App:
         
         self.logger.info(f"Started {len(self._background_tasks)} background tasks")
     
+    def _start_background_tasks_non_blocking(self) -> None:
+        """Start background monitoring and maintenance tasks in a non-blocking way."""
+        self.logger.debug("Starting background tasks (non-blocking)...")
+        
+        # Start tasks only if components are available
+        if self._component_health.get('ollama_client', False):
+            health_task = asyncio.create_task(self._health_monitor_loop())
+            self._background_tasks.append(health_task)
+        
+        # Metrics collection doesn't depend on external services
+        metrics_task = asyncio.create_task(self._metrics_collection_loop())
+        self._background_tasks.append(metrics_task)
+        
+        # Context cleanup task (only if context manager is available)
+        if self._component_health.get('context_manager', False) and self.context_manager:
+            cleanup_task = asyncio.create_task(self._context_cleanup_loop())
+            self._background_tasks.append(cleanup_task)
+        
+        self.logger.info(f"Started {len(self._background_tasks)} background tasks")
+    
     async def _initial_health_checks(self) -> None:
         """Perform initial health checks on all subsystems."""
         self.logger.debug("Performing initial health checks...")
         
-        health_status = await self.get_health_status()
+        health_status = await self.get_health_status(startup_mode=True)
         
-        critical_issues = [
-            component for component, status in health_status.items()
-            if not status.get("healthy", False) and status.get("critical", False)
-        ]
+        critical_issues = []
+        warnings = []
         
+        for component, status in health_status.items():
+            if not status.get("healthy", False):
+                if status.get("critical", False):
+                    critical_issues.append(component)
+                    self.logger.error(f"Critical health check failure for {component}: {status.get('error', 'Unknown error')}")
+                else:
+                    warnings.append(component)
+                    self.logger.warning(f"Health check warning for {component}: {status.get('error', 'Minor issue')}")
+            else:
+                self.logger.debug(f"Health check passed for {component}")
+        
+        if warnings:
+            self.logger.info(f"Health check warnings (non-critical): {warnings}")
+        
+        # Only fail on critical issues, and be more lenient during startup
         if critical_issues:
-            raise RuntimeError(f"Critical health check failures: {critical_issues}")
+            # Filter out known startup-related issues
+            startup_tolerant_critical_issues = []
+            for issue in critical_issues:
+                if issue == "ollama" and not self.config.ollama.required_for_startup:
+                    self.logger.warning("Ollama service not available but marked as non-required for startup")
+                    continue
+                startup_tolerant_critical_issues.append(issue)
+            
+            if startup_tolerant_critical_issues:
+                raise RuntimeError(f"Critical health check failures: {startup_tolerant_critical_issues}")
         
         self.logger.info("Initial health checks completed successfully")
     
     def _display_startup_banner(self) -> None:
-        """Display the application startup banner."""
+        """Display the application startup banner with actual component status."""
+        # Check component statuses - use ASCII characters for Windows compatibility
+        ollama_status = "OK" if self._component_health.get('ollama_client', False) else "FAIL"
+        context_status = "OK" if self._component_health.get('context_manager', False) else "FAIL"
+        model_status = "OK" if self._component_health.get('model_manager', False) else "FAIL"
+        security_status = "OK" if self._component_health.get('security_manager', False) else "FAIL"
+        
+        # Set colors based on status
+        ollama_color = "green" if ollama_status == "OK" else "red"
+        context_color = "green" if context_status == "OK" else "yellow"
+        model_color = "green" if model_status == "OK" else "yellow"
+        security_color = "green" if security_status == "OK" else "yellow"
+        
+        # App state indicator
+        state_text = f"State: {self.state.value.title()}"
+        state_color = "green" if self.state == AppState.RUNNING else "yellow" if self.state == AppState.DEGRADED else "red"
+        
+        banner_content = f"""[bold cyan]ABOV3 - AI-Powered Coding Assistant[/bold cyan]
+
+[{state_color}]{state_text}[/{state_color}]
+
+[{ollama_color}]{ollama_status}[/{ollama_color}] Ollama Connection: {"Connected" if ollama_status == "OK" else "Failed"} ({self.config.ollama.host})
+[{context_color}]{context_status}[/{context_color}] Context Manager: {"Active" if context_status == "OK" else "Failed"}
+[{model_color}]{model_status}[/{model_color}] Model Manager: {"Active" if model_status == "OK" else "Failed"}
+[{security_color}]{security_status}[/{security_color}] Security Manager: {"Active" if security_status == "OK" else "Failed"}
+[green]OK[/green] Interactive Mode: {'Enabled' if self.interactive else 'Disabled'}"""
+        
+        if self.metrics.failed_components:
+            banner_content += f"\n\n[yellow]WARN[/yellow] Failed Components: {', '.join(self.metrics.failed_components)}"
+        
+        banner_content += "\n\n[dim]Type '/help' for available commands or start coding![/dim]"
+        
+        border_style = "green" if self.state == AppState.RUNNING else "yellow" if self.state == AppState.DEGRADED else "red"
+        
         banner = Panel(
-            Text.from_markup(
-                "[bold cyan]ABOV3 - AI-Powered Coding Assistant[/bold cyan]\n\n"
-                f"[green]✓[/green] Connected to Ollama at {self.config.ollama.host}\n"
-                f"[green]✓[/green] Default Model: {self.config.model.default_model}\n"
-                f"[green]✓[/green] Context Window: {self.config.model.context_length:,} tokens\n"
-                f"[green]✓[/green] Interactive Mode: {'Enabled' if self.interactive else 'Disabled'}\n\n"
-                "[dim]Type '/help' for available commands or start coding![/dim]"
-            ),
+            Text.from_markup(banner_content),
             title="[bold blue]Welcome to ABOV3[/bold blue]",
-            border_style="blue",
+            border_style=border_style,
             padding=(1, 2)
         )
         self.console.print(banner)
@@ -392,7 +607,7 @@ class ABOV3App:
                 messages.append(ChatMessage(role="user", content=user_input))
             
             # Generate response
-            if self.ollama_client:
+            if self.ollama_client and self._component_health.get('ollama_client', False):
                 if self.config.ui.syntax_highlighting:  # Use as streaming indicator
                     # Streaming response
                     return self._stream_response(messages)
@@ -413,7 +628,11 @@ class ABOV3App:
                     self.metrics.total_responses += 1
                     return response_content
             else:
-                return "[red]Error:[/red] Ollama client not available"
+                # Provide helpful message based on current state
+                if self.state == AppState.DEGRADED:
+                    return "[yellow]Warning:[/yellow] ABOV3 is running in degraded mode. AI chat functionality is not available due to Ollama connection issues. Please check your Ollama server and restart ABOV3."
+                else:
+                    return "[red]Error:[/red] Ollama client not available"
         
         except Exception as e:
             self.metrics.total_errors += 1
@@ -444,15 +663,51 @@ class ABOV3App:
             yield f"[red]Error:[/red] {str(e)}"
     
     async def _health_monitor_loop(self) -> None:
-        """Background health monitoring loop."""
+        """Background health monitoring loop with resilient error handling."""
+        consecutive_failures = 0
+        max_consecutive_failures = 5
+        
         while not self._shutdown_event.is_set():
             try:
                 await asyncio.sleep(60)  # Check every minute
                 
-                if self.ollama_client:
-                    healthy = await self.ollama_client.health_check()
-                    if not healthy:
-                        self.logger.warning("Ollama health check failed")
+                # Only monitor if we have components to monitor
+                if self._component_health.get('ollama_client', False) and self.ollama_client:
+                    try:
+                        healthy = await asyncio.wait_for(
+                            self.ollama_client.health_check(), 
+                            timeout=10.0
+                        )
+                        if healthy:
+                            consecutive_failures = 0
+                            # If we were in degraded mode and Ollama is back, try to recover
+                            if self.state == AppState.DEGRADED and 'ollama_client' in self.metrics.failed_components:
+                                self.logger.info("Ollama service recovered - removing from failed components")
+                                self.metrics.failed_components.remove('ollama_client')
+                                self._component_health['ollama_client'] = True
+                                
+                                # Check if we can transition back to RUNNING state
+                                if not self.metrics.failed_components:
+                                    self.state = AppState.RUNNING
+                                    self.logger.info("All components recovered - transitioning to RUNNING state")
+                        else:
+                            consecutive_failures += 1
+                            self.logger.warning(f"Ollama health check failed (consecutive failures: {consecutive_failures})")
+                            
+                            # If too many consecutive failures, mark as degraded
+                            if consecutive_failures >= max_consecutive_failures and self.state == AppState.RUNNING:
+                                self.logger.error("Too many consecutive Ollama failures - marking as degraded")
+                                self.state = AppState.DEGRADED
+                                if 'ollama_client' not in self.metrics.failed_components:
+                                    self.metrics.failed_components.append('ollama_client')
+                                self._component_health['ollama_client'] = False
+                    
+                    except asyncio.TimeoutError:
+                        consecutive_failures += 1
+                        self.logger.warning(f"Ollama health check timeout (consecutive: {consecutive_failures})")
+                    except Exception as e:
+                        consecutive_failures += 1
+                        self.logger.warning(f"Ollama health check error (consecutive: {consecutive_failures}): {e}")
                 
                 self._last_health_check = time.time()
             
@@ -590,9 +845,12 @@ class ABOV3App:
             self.logger.error(f"Error during shutdown: {e}")
             self.state = AppState.ERROR
     
-    async def get_health_status(self) -> Dict[str, Dict[str, Any]]:
+    async def get_health_status(self, startup_mode: bool = False) -> Dict[str, Dict[str, Any]]:
         """
         Get comprehensive health status of all subsystems.
+        
+        Args:
+            startup_mode: If True, use more lenient health checks suitable for startup
         
         Returns:
             Dictionary with health status of each component
@@ -602,18 +860,37 @@ class ABOV3App:
         # Ollama client health
         if self.ollama_client:
             try:
-                healthy = await self.ollama_client.health_check()
+                # Add timeout for health check to prevent hanging
+                healthy = await asyncio.wait_for(
+                    self.ollama_client.health_check(), 
+                    timeout=5.0 if startup_mode else 10.0
+                )
                 status["ollama"] = {
                     "healthy": healthy,
-                    "critical": True,
+                    "critical": not startup_mode,  # Less critical during startup
                     "details": "Ollama API connection"
+                }
+                if not healthy:
+                    status["ollama"]["error"] = "Ollama server not responding"
+            except asyncio.TimeoutError:
+                status["ollama"] = {
+                    "healthy": False,
+                    "critical": not startup_mode,  # Less critical during startup
+                    "error": "Ollama health check timeout"
                 }
             except Exception as e:
                 status["ollama"] = {
                     "healthy": False,
-                    "critical": True,
+                    "critical": not startup_mode,  # Less critical during startup
                     "error": str(e)
                 }
+        else:
+            # If client not initialized yet
+            status["ollama"] = {
+                "healthy": False,
+                "critical": False,
+                "error": "Ollama client not initialized"
+            }
         
         # Context manager health
         if self.context_manager:
@@ -634,11 +911,21 @@ class ABOV3App:
         # Model manager health
         if self.model_manager:
             try:
-                models = self.model_manager.list_models()
+                # Use timeout for model listing to prevent hanging
+                models = await asyncio.wait_for(
+                    self.model_manager.list_models(), 
+                    timeout=10.0 if startup_mode else 15.0
+                )
                 status["models"] = {
                     "healthy": len(models) > 0,
                     "critical": False,
                     "details": f"{len(models)} models available"
+                }
+            except asyncio.TimeoutError:
+                status["models"] = {
+                    "healthy": False,
+                    "critical": False,
+                    "error": "Model listing timed out"
                 }
             except Exception as e:
                 status["models"] = {
@@ -646,18 +933,35 @@ class ABOV3App:
                     "critical": False,
                     "error": str(e)
                 }
+        else:
+            status["models"] = {
+                "healthy": False,
+                "critical": False,
+                "error": "Model manager not initialized"
+            }
         
         # Application health
+        # During startup, STARTING and INITIALIZING states are acceptable
+        valid_states = [AppState.RUNNING]
+        if startup_mode:
+            valid_states.extend([AppState.STARTING, AppState.INITIALIZING])
+        
+        app_healthy = self.state in valid_states
         status["application"] = {
-            "healthy": self.state == AppState.RUNNING,
-            "critical": True,
+            "healthy": app_healthy,
+            "critical": not startup_mode and self.state == AppState.ERROR,  # Only critical if in error state outside startup
             "details": {
                 "state": self.state.value,
                 "uptime": self.metrics.get_uptime(),
                 "requests": self.metrics.total_requests,
-                "errors": self.metrics.total_errors
+                "errors": self.metrics.total_errors,
+                "startup_mode": startup_mode,
+                "valid_states": [s.value for s in valid_states]
             }
         }
+        
+        if not app_healthy:
+            status["application"]["error"] = f"Application in {self.state.value} state (expected one of {[s.value for s in valid_states]})"
         
         return status
     
@@ -687,6 +991,80 @@ class ABOV3App:
         """Add a callback to be called during shutdown."""
         self._cleanup_callbacks.append(callback)
     
+    def is_healthy(self) -> bool:
+        """Check if the application is in a healthy state."""
+        return self.state in [AppState.RUNNING, AppState.DEGRADED]
+    
+    def is_functional(self) -> bool:
+        """Check if core functionality is available."""
+        return self._component_health.get('ollama_client', False)
+    
+    def get_component_status(self, component: str) -> bool:
+        """Get the health status of a specific component."""
+        return self._component_health.get(component, False)
+    
+    def force_component_recovery(self, component: str) -> None:
+        """Force a component recovery attempt (restart background task if needed)."""
+        self.logger.info(f"Forcing recovery attempt for component: {component}")
+        
+        if component == 'ollama_client' and component in self.metrics.failed_components:
+            # Try to re-establish Ollama connection
+            asyncio.create_task(self._attempt_ollama_recovery())
+    
+    async def _attempt_ollama_recovery(self) -> None:
+        """Attempt to recover Ollama connection."""
+        try:
+            if self.ollama_client:
+                self.logger.info("Attempting Ollama connection recovery...")
+                healthy = await asyncio.wait_for(
+                    self.ollama_client.health_check(), 
+                    timeout=self._health_check_timeout
+                )
+                
+                if healthy:
+                    self.logger.info("Ollama connection recovered successfully")
+                    if 'ollama_client' in self.metrics.failed_components:
+                        self.metrics.failed_components.remove('ollama_client')
+                    self._component_health['ollama_client'] = True
+                    
+                    # Update state if all components are healthy
+                    if not self.metrics.failed_components and self.state == AppState.DEGRADED:
+                        self.state = AppState.RUNNING
+                        self.logger.info("Application state upgraded to RUNNING")
+                else:
+                    self.logger.warning("Ollama connection recovery failed - health check failed")
+        except Exception as e:
+            self.logger.error(f"Ollama recovery attempt failed: {e}")
+    
+    def _report_startup_progress(self, message: str, is_error: bool = False) -> None:
+        """Report startup progress with consistent formatting."""
+        if is_error:
+            self.logger.error(f"STARTUP: {message}")
+            if self.interactive:
+                self.console.print(f"[red]ERROR: {message}[/red]")
+        else:
+            self.logger.info(f"STARTUP: {message}")
+            if self.interactive:
+                self.console.print(f"[blue]INFO: {message}[/blue]")
+    
+    def _report_component_status(self, components_status: Dict[str, bool]) -> None:
+        """Report the status of all components during startup."""
+        self.logger.info("Component initialization results:")
+        
+        if self.interactive:
+            self.console.print("\n[bold]Component Status:[/bold]")
+        
+        for component, success in components_status.items():
+            status_text = "OK" if success else "FAILED"
+            color = "green" if success else "red"
+            
+            self.logger.info(f"  {component}: {'SUCCESS' if success else 'FAILED'}")
+            if self.interactive:
+                self.console.print(f"  [{color}]{status_text}[/{color}] {component.replace('_', ' ').title()}")
+        
+        if self.interactive:
+            self.console.print()  # Add blank line
+    
     # Context manager integration
     def get_context_stats(self) -> Optional[Dict[str, Any]]:
         """Get context manager statistics."""
@@ -707,10 +1085,10 @@ class ABOV3App:
         return []
     
     # Model manager integration
-    def list_models(self) -> List[Dict[str, Any]]:
+    async def list_models(self) -> List[Dict[str, Any]]:
         """List available models."""
         if self.model_manager:
-            return self.model_manager.list_models()
+            return await self.model_manager.list_models()
         return []
     
     def is_model_available(self, model_name: str) -> bool:
@@ -723,9 +1101,13 @@ class ABOV3App:
         """Install a model."""
         try:
             if self.model_manager:
-                self.model_manager.install_model(model_name, progress_callback)
-                self.logger.info(f"Model {model_name} installed successfully")
-                return True
+                success = await self.model_manager.install_model(model_name, progress_callback)
+                if success:
+                    self.logger.info(f"Model {model_name} installed successfully")
+                    return True
+                else:
+                    self.logger.error(f"Failed to install model {model_name}")
+                    return False
         except Exception as e:
             self.logger.error(f"Failed to install model {model_name}: {e}")
         return False
@@ -734,7 +1116,23 @@ class ABOV3App:
         """Get information about a specific model."""
         if self.model_manager:
             try:
-                return self.model_manager.get_model_info(model_name)
+                model_info = self.model_manager.get_model_info_sync(model_name)
+                if model_info:
+                    # Convert ModelInfo object to dictionary
+                    return {
+                        'name': model_info.name,
+                        'tag': model_info.tag,
+                        'full_name': model_info.full_name,
+                        'size': model_info.size,
+                        'size_gb': model_info.size_gb,
+                        'digest': model_info.digest,
+                        'modified_at': model_info.modified_at.isoformat() if model_info.modified_at else None,
+                        'parameter_count': model_info.parameter_count,
+                        'quantization': model_info.quantization,
+                        'architecture': model_info.architecture,
+                        'size_category': model_info.size_category.value if model_info.size_category else None
+                    }
+                return None
             except Exception as e:
                 self.logger.error(f"Failed to get model info for {model_name}: {e}")
         return None
