@@ -1,0 +1,23 @@
+# Core dependencies for ABOV3 4 Ollama
+ollama>=0.3.0
+rich>=13.0.0
+prompt-toolkit>=3.0.36
+click>=8.0.0
+pydantic>=2.0.0
+aiohttp>=3.8.0
+pygments>=2.10.0
+toml>=0.10.2
+gitpython>=3.1.30
+watchdog>=3.0.0
+python-dotenv>=1.0.0
+colorama>=0.4.6
+packaging>=21.0
+
+# Fine-tuning and Training dependencies
+numpy>=1.21.0
+pyyaml>=6.0.0
+psutil>=5.9.0
+aiosqlite>=0.17.0
+
+# Optional GPU monitoring (for enhanced resource monitoring)
+# nvidia-ml-py3>=7.352.0  # Uncomment if GPU monitoring is needed
