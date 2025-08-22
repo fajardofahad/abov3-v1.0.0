@@ -430,8 +430,9 @@ class ABOV3App:
         repl_config = REPLConfig(
             prompt_text="ABOV3> ",
             theme=self.config.ui.theme,
-            enable_syntax_highlighting=self.config.ui.syntax_highlighting,
+            enable_syntax_highlighting=False,  # Disable to prevent streaming mode initially
             enable_vim_mode=self.config.ui.vim_mode,
+            enable_multiline=False,  # Explicitly disable multiline to prevent ... prompts
             history_file=self.config.get_data_dir() / "history.txt",
             session_file=self.config.get_data_dir() / "session.json",
             max_history_size=self.config.ui.max_history_display
@@ -441,6 +442,9 @@ class ABOV3App:
             config=repl_config,
             process_callback=self._process_user_input
         )
+        
+        # Add reference to app instance for status commands
+        self.repl.app_instance = self
         
         self.logger.info("REPL interface initialized successfully")
     
@@ -568,6 +572,9 @@ class ABOV3App:
         """
         Process user input and generate AI response.
         
+        This method is called by the REPL after it has already handled commands.
+        It processes the input as a chat message and sends it to the AI.
+        
         Args:
             user_input: Input from the user
             
@@ -575,9 +582,10 @@ class ABOV3App:
             AI response or async iterator for streaming
         """
         try:
+            # Process as AI chat input (commands are already handled by REPL)
             self.metrics.total_requests += 1
             
-            # Security check
+            # Security check for chat input
             if self.security_manager:
                 is_safe, issues = self.security_manager.is_content_safe(user_input)
                 if not is_safe:
@@ -608,13 +616,28 @@ class ABOV3App:
             
             # Generate response
             if self.ollama_client and self._component_health.get('ollama_client', False):
+                # Check if default model is available
+                model_to_use = self.config.model.default_model
+                try:
+                    if not await self.ollama_client.model_exists(model_to_use):
+                        # Try to find an alternative model
+                        available_models = await self.ollama_client.list_models()
+                        if available_models:
+                            model_to_use = available_models[0].name
+                            self.logger.warning(f"Default model {self.config.model.default_model} not found, using {model_to_use}")
+                        else:
+                            return "[red]Error:[/red] No models available. Please install a model with: ollama pull llama3.2:latest"
+                except Exception as e:
+                    self.logger.error(f"Error checking model availability: {e}")
+                    # Continue with configured model and let the API handle the error
+                
                 if self.config.ui.syntax_highlighting:  # Use as streaming indicator
                     # Streaming response
-                    return self._stream_response(messages)
+                    return self._stream_response(messages, model_to_use)
                 else:
                     # Non-streaming response
                     response = await self.ollama_client.chat(
-                        model=self.config.model.default_model,
+                        model=model_to_use,
                         messages=messages,
                         stream=False
                     )
@@ -639,12 +662,13 @@ class ABOV3App:
             self.logger.error(f"Error processing user input: {e}")
             return f"[red]Error:[/red] {str(e)}"
     
-    async def _stream_response(self, messages: List[ChatMessage]) -> AsyncIterator[str]:
+    async def _stream_response(self, messages: List[ChatMessage], model: Optional[str] = None) -> AsyncIterator[str]:
         """Stream AI response in real-time."""
+        model_to_use = model or self.config.model.default_model
         try:
             full_response = ""
             async for chunk in await self.ollama_client.chat(
-                model=self.config.model.default_model,
+                model=model_to_use,
                 messages=messages,
                 stream=True
             ):
@@ -762,6 +786,9 @@ class ABOV3App:
             if self.interactive and self.repl:
                 # Run interactive REPL
                 await self.repl.run()
+                # If REPL exits, signal shutdown
+                if not self.repl.running:
+                    self._shutdown_event.set()
             else:
                 # Non-interactive mode - wait for shutdown
                 await self._shutdown_event.wait()

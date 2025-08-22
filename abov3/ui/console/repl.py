@@ -58,6 +58,15 @@ from .completers import ContextAwareCompleter, MultiCompleter
 from .formatters import OutputFormatter, StreamingFormatter
 from .keybindings import create_keybindings, KeyBindingMode
 
+# Windows compatibility imports
+if sys.platform == "win32":
+    try:
+        from prompt_toolkit.output.win32 import Win32Output
+        from prompt_toolkit.input.win32 import Win32Input
+    except ImportError:
+        Win32Output = None
+        Win32Input = None
+
 
 @dataclass
 class REPLConfig:
@@ -99,7 +108,7 @@ class REPLConfig:
     buffer_size: int = 4096
     
     # Advanced Features
-    enable_multiline: bool = True
+    enable_multiline: bool = False  # Disable multiline to prevent ... prompt issues
     enable_mouse_support: bool = True
     enable_bracketed_paste: bool = True
     enable_suspend: bool = True
@@ -146,6 +155,8 @@ class CommandProcessor:
         '/reset': 'Reset the session',
         '/export': 'Export session to file',
         '/import': 'Import session from file',
+        '/status': 'Show system status',
+        '/models': 'List available AI models',
     }
     
     def __init__(self, repl: 'ABOV3REPL'):
@@ -170,6 +181,8 @@ class CommandProcessor:
             '/reset': self._cmd_reset,
             '/export': self._cmd_export,
             '/import': self._cmd_import,
+            '/status': self._cmd_status,
+            '/models': self._cmd_models,
         }
     
     def is_command(self, text: str) -> bool:
@@ -177,19 +190,45 @@ class CommandProcessor:
         return text.strip().startswith('/')
     
     async def process(self, text: str) -> Optional[str]:
-        """Process a command."""
-        parts = text.strip().split(maxsplit=1)
+        """Process a command with security validation."""
+        # Basic input validation
+        if not text or not text.strip():
+            return "Empty command"
+        
+        # Prevent command injection by validating input
+        text = text.strip()
+        if len(text) > 1000:  # Reasonable command length limit
+            return "Command too long (max 1000 characters)"
+        
+        # Check for suspicious characters that might indicate injection attempts
+        # Skip the check for the command part itself (before the first space)
+        command_part = text.split(maxsplit=1)[0]
+        args_part = text[len(command_part):].strip() if len(text) > len(command_part) else ""
+        
+        # Only check arguments for suspicious characters, not the command itself
+        if args_part:
+            suspicious_chars = [';', '&&', '||', '`', '$']
+            for char in suspicious_chars:
+                if char in args_part:
+                    return f"Invalid character '{char}' in command arguments. Arguments should not contain shell operators."
+        
+        parts = text.split(maxsplit=1)
         command = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
         
-        if command in self.handlers:
+        # Validate command exists
+        if command not in self.handlers:
+            return f"Unknown command: {command}. Type /help for available commands."
+        
+        # Execute command with error handling
+        try:
             handler = self.handlers[command]
             if asyncio.iscoroutinefunction(handler):
                 return await handler(args)
             else:
                 return handler(args)
-        else:
-            return f"Unknown command: {command}. Type /help for available commands."
+        except Exception as e:
+            return f"Command execution error: {str(e)}"
     
     def _cmd_help(self, args: str) -> str:
         """Show help information."""
@@ -340,6 +379,74 @@ class CommandProcessor:
             return "Please provide a filename to import"
         success = await self.repl.import_session(filename)
         return f"Session imported from {filename}" if success else "Failed to import session"
+    
+    def _cmd_status(self, args: str) -> str:
+        """Show system status."""
+        # Try to get status from app instance if available
+        app_instance = getattr(self.repl, 'app_instance', None)
+        if app_instance:
+            try:
+                # Get basic status info
+                status_info = {
+                    "State": app_instance.state.value,
+                    "Uptime": f"{app_instance.metrics.get_uptime():.1f}s",
+                    "Total Requests": app_instance.metrics.total_requests,
+                    "Total Responses": app_instance.metrics.total_responses,
+                    "Total Errors": app_instance.metrics.total_errors,
+                    "Memory Usage": f"{app_instance.metrics.memory_usage_mb:.1f}MB",
+                }
+                
+                # Add component health
+                for component, health in app_instance._component_health.items():
+                    status_info[f"{component.replace('_', ' ').title()}"] = "OK" if health else "FAILED"
+                
+                table = Table(title="System Status", show_header=True)
+                table.add_column("Component", style="cyan")
+                table.add_column("Status", style="green")
+                
+                for key, value in status_info.items():
+                    table.add_row(key, str(value))
+                
+                self.repl.console.print(table)
+                return ""
+            except Exception as e:
+                return f"Error getting system status: {e}"
+        else:
+            return "System status not available - app instance not found"
+    
+    def _cmd_models(self, args: str) -> str:
+        """List available AI models."""
+        app_instance = getattr(self.repl, 'app_instance', None)
+        if app_instance and app_instance.model_manager:
+            try:
+                # Try to get models synchronously if possible
+                models = []
+                if hasattr(app_instance.model_manager, 'list_models_sync'):
+                    models = app_instance.model_manager.list_models_sync()
+                else:
+                    return "Model listing requires async operation - use CLI 'abov3 models list' instead"
+                
+                if not models:
+                    return "No models available"
+                
+                table = Table(title="Available AI Models", show_header=True)
+                table.add_column("Model Name", style="cyan")
+                table.add_column("Size", style="green")
+                table.add_column("Modified", style="yellow")
+                
+                for model in models:
+                    table.add_row(
+                        model.get("name", "Unknown"),
+                        model.get("size", "Unknown"),
+                        model.get("modified_at", "Unknown")
+                    )
+                
+                self.repl.console.print(table)
+                return ""
+            except Exception as e:
+                return f"Error listing models: {e}"
+        else:
+            return "Model manager not available"
 
 
 class ABOV3REPL:
@@ -407,24 +514,64 @@ class ABOV3REPL:
         if not hasattr(self, 'style') or self.style is None:
             self._setup_style()
         
-        # Create the prompt session
-        self.session = PromptSession(
-            message=self.config.prompt_text,
-            multiline=self.config.enable_multiline,
-            history=self.history_obj,
-            auto_suggest=AutoSuggestFromHistory() if self.config.enable_auto_suggestions else None,
-            completer=completer if self.config.enable_completion else None,
-            complete_while_typing=True,
-            key_bindings=key_bindings,
-            enable_history_search=self.config.enable_search,
-            mouse_support=self.config.enable_mouse_support,
-            wrap_lines=self.config.wrap_lines,
-            enable_suspend=self.config.enable_suspend,
-            color_depth=self.config.color_depth,
-            style=self.style,
-            include_default_pygments_style=False,
-            lexer=PygmentsLexer(PythonLexer) if self.config.enable_syntax_highlighting else None,
-        )
+        # Prepare session arguments with Windows compatibility
+        session_args = {
+            # Don't set message here - we'll pass it in prompt_async calls
+            'multiline': False,  # Always start in single-line mode
+            'history': self.history_obj,
+            'auto_suggest': AutoSuggestFromHistory() if self.config.enable_auto_suggestions else None,
+            'completer': completer if self.config.enable_completion else None,
+            'complete_while_typing': True,
+            'key_bindings': key_bindings,
+            'enable_history_search': self.config.enable_search,
+            'mouse_support': self.config.enable_mouse_support,
+            'wrap_lines': self.config.wrap_lines,
+            'enable_suspend': self.config.enable_suspend,
+            'color_depth': self.config.color_depth,
+            'style': self.style,
+            'include_default_pygments_style': False,
+            'lexer': PygmentsLexer(PythonLexer) if self.config.enable_syntax_highlighting else None,
+        }
+        
+        # Handle Windows and terminal compatibility issues
+        if sys.platform == "win32":
+            # Force disable mouse support and reduce color depth for compatibility
+            session_args['mouse_support'] = False
+            session_args['color_depth'] = ColorDepth.DEPTH_8_BIT
+            
+            if Win32Output and Win32Input:
+                try:
+                    session_args['output'] = Win32Output(sys.stdout)
+                    session_args['input'] = Win32Input(sys.stdin)
+                except Exception:
+                    # If Windows I/O fails, fall back to defaults
+                    pass
+        
+        # Additional compatibility for Git Bash/MinGW environments
+        if 'TERM' in os.environ and 'xterm' in os.environ.get('TERM', ''):
+            # Force compatibility mode for xterm-like terminals
+            session_args['mouse_support'] = False
+            session_args['color_depth'] = ColorDepth.DEPTH_8_BIT
+        
+        # Create the prompt session with fallback
+        try:
+            self.session = PromptSession(**session_args)
+        except Exception as e:
+            # If PromptSession fails, create a fallback session with minimal features
+            fallback_args = {
+                'multiline': False,
+                'history': self.history_obj,
+                'mouse_support': False,
+                'color_depth': ColorDepth.DEPTH_8_BIT,
+                'enable_suspend': False,
+            }
+            try:
+                self.session = PromptSession(**fallback_args)
+            except Exception as e2:
+                # If even the fallback fails, use the simple fallback mode
+                self.console.print(f"[yellow]Warning: Advanced REPL features disabled due to terminal compatibility issues[/yellow]")
+                self.console.print(f"[dim]Reason: {e}[/dim]")
+                self.session = None  # Will use simple input() fallback
     
     def _setup_style(self):
         """Setup the color style."""
@@ -741,12 +888,17 @@ class ABOV3REPL:
         
         while self.running:
             try:
-                # Get user input
-                text = await self.session.prompt_async(
-                    message=self.config.prompt_text,
-                    multiline=self.config.enable_multiline,
-                    prompt_continuation=self.config.multiline_prompt
-                )
+                # Get user input - use fallback if session is None
+                if self.session is not None:
+                    # Use advanced prompt session
+                    text = await self.session.prompt_async(
+                        message=self.config.prompt_text,
+                        multiline=False  # Force single-line to prevent ... prompts
+                    )
+                else:
+                    # Fallback to simple input for compatibility
+                    self.console.print(self.config.prompt_text, end="", style="cyan bold")
+                    text = await asyncio.get_event_loop().run_in_executor(None, input)
                 
                 if not text.strip():
                     continue
@@ -755,25 +907,43 @@ class ABOV3REPL:
                 self.history.append((text, datetime.now().isoformat()))
                 
                 # Process input
-                if self.config.async_mode:
+                try:
                     result = await self.process_input(text)
-                else:
-                    result = self.process_input(text)
-                
-                # Display output
-                if result is not None:
-                    self.display_output(result)
+                    
+                    # Display output - handle both string and AsyncIterator responses
+                    if result is not None:
+                        # Check if result is an async iterator (streaming response)
+                        if hasattr(result, '__aiter__'):
+                            # Stream the response
+                            streamed_result = await self.stream_output(result)
+                            if streamed_result and streamed_result.strip():
+                                # Display the final result if needed (already displayed during streaming)
+                                pass
+                        elif result != "":
+                            # Regular string response
+                            self.display_output(result)
+                except Exception as e:
+                    self.display_error(e)
                     
             except KeyboardInterrupt:
+                self.console.print("\n[yellow]Interrupted. Use /exit to quit.[/yellow]")
                 continue
             except EOFError:
+                # Handle Ctrl+D (EOF) - same as /exit command
+                self.console.print("\n[cyan]Ctrl+D detected - exiting...[/cyan]")
+                self.running = False
                 break
             except Exception as e:
                 self.display_error(e)
+                # Continue running instead of crashing
+                continue
         
         # Cleanup
         if self.config.auto_save_session and self.config.session_file:
-            await self.save_session(str(self.config.session_file))
+            try:
+                await self.save_session(str(self.config.session_file))
+            except Exception as e:
+                self.console.print(f"[yellow]Warning: Failed to save session: {e}[/yellow]")
         
         # Display goodbye message
         self.console.print("\n[cyan]Goodbye![/cyan]")

@@ -159,6 +159,16 @@ class OllamaClient:
     
     async def close(self) -> None:
         """Close the client and cleanup resources."""
+        if self._client:
+            # Try to close the ollama client if it has a close method
+            try:
+                if hasattr(self._client, 'close'):
+                    await self._client.close()
+                elif hasattr(self._client, 'aclose'):
+                    await self._client.aclose()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            
         if self._owned_session and self._session:
             await self._session.close()
             self._session = None
@@ -315,9 +325,14 @@ class OllamaClient:
             True if server is healthy, False otherwise
         """
         try:
-            await self._ensure_session()
-            async with self._session.get(f"{self.config.ollama.host}/api/tags") as response:
-                return response.status == 200
+            await self._ensure_client()
+            # Try to list models as a health check - this is more reliable
+            # than just checking the /api/tags endpoint
+            await asyncio.wait_for(self._client.list(), timeout=5.0)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("Health check timed out")
+            return False
         except Exception as e:
             logger.warning(f"Health check failed: {e}")
             return False
@@ -575,33 +590,53 @@ class OllamaClient:
         except Exception as e:
             raise self._handle_ollama_error(e)
     
-    def _parse_chat_response(self, response: Dict[str, Any]) -> ChatResponse:
+    def _parse_chat_response(self, response) -> ChatResponse:
         """
         Parse Ollama chat response into ChatResponse object.
         
         Args:
-            response: Raw response from Ollama
+            response: Response from Ollama (either dict or ChatResponse object)
             
         Returns:
             Parsed ChatResponse object
         """
-        message_data = response.get("message", {})
-        message = ChatMessage(
-            role=message_data.get("role", "assistant"),
-            content=message_data.get("content", ""),
-            images=message_data.get("images"),
-        )
-        
-        return ChatResponse(
-            message=message,
-            done=response.get("done", False),
-            total_duration=response.get("total_duration"),
-            load_duration=response.get("load_duration"),
-            prompt_eval_count=response.get("prompt_eval_count"),
-            prompt_eval_duration=response.get("prompt_eval_duration"),
-            eval_count=response.get("eval_count"),
-            eval_duration=response.get("eval_duration"),
-        )
+        # Handle both dict format (legacy) and ChatResponse object from ollama library
+        if hasattr(response, 'message'):
+            # It's an ollama ChatResponse object
+            message = ChatMessage(
+                role=response.message.role if hasattr(response.message, 'role') else "assistant",
+                content=response.message.content if hasattr(response.message, 'content') else "",
+                images=getattr(response.message, 'images', None),
+            )
+            return ChatResponse(
+                message=message,
+                done=getattr(response, 'done', False),
+                total_duration=getattr(response, 'total_duration', None),
+                load_duration=getattr(response, 'load_duration', None),
+                prompt_eval_count=getattr(response, 'prompt_eval_count', None),
+                prompt_eval_duration=getattr(response, 'prompt_eval_duration', None),
+                eval_count=getattr(response, 'eval_count', None),
+                eval_duration=getattr(response, 'eval_duration', None),
+            )
+        else:
+            # It's a dict format (fallback)
+            message_data = response.get("message", {})
+            message = ChatMessage(
+                role=message_data.get("role", "assistant"),
+                content=message_data.get("content", ""),
+                images=message_data.get("images"),
+            )
+            
+            return ChatResponse(
+                message=message,
+                done=response.get("done", False),
+                total_duration=response.get("total_duration"),
+                load_duration=response.get("load_duration"),
+                prompt_eval_count=response.get("prompt_eval_count"),
+                prompt_eval_duration=response.get("prompt_eval_duration"),
+                eval_count=response.get("eval_count"),
+                eval_duration=response.get("eval_duration"),
+            )
     
     async def generate(
         self,

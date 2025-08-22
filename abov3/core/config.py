@@ -35,7 +35,7 @@ class OllamaConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Configuration for AI models."""
     
-    default_model: str = Field(default="llama3.2:latest", description="Default model to use")
+    default_model: str = Field(default="llama3.2", description="Default model to use")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Model temperature")
     top_p: float = Field(default=0.9, ge=0.0, le=1.0, description="Top-p sampling")
     top_k: int = Field(default=40, ge=1, description="Top-k sampling")
@@ -56,6 +56,7 @@ class UIConfig(BaseModel):
     vim_mode: bool = Field(default=False, description="Enable vim key bindings")
     show_model_info: bool = Field(default=True, description="Show current model in prompt")
     max_history_display: int = Field(default=50, description="Max history items to display")
+    streaming_output: bool = Field(default=True, description="Enable streaming output for AI responses")
 
 
 class HistoryConfig(BaseModel):
