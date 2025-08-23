@@ -108,7 +108,7 @@ class ABOV3App:
         self._startup_timeout = 30.0  # 30 seconds startup timeout
         self._health_check_timeout = 5.0  # 5 seconds per health check
         
-        # Logging setup
+        # Logging setup - do this FIRST
         self._setup_logging()
         self.logger = logging.getLogger(__name__)
         
@@ -140,10 +140,11 @@ class ABOV3App:
         # Signal handlers
         self._setup_signal_handlers()
         
+        # Now we can safely log since logger is set up
         self.logger.info("ABOV3 application initialized")
     
     def _setup_logging(self) -> None:
-        """Setup application logging."""
+        """Setup application logging with proper third-party library suppression."""
         log_level = getattr(logging, self.config.logging.level.upper(), logging.INFO)
         
         # Configure root logger
@@ -171,6 +172,58 @@ class ABOV3App:
         logger = logging.getLogger()
         logger.handlers = handlers
         logger.setLevel(log_level)
+        
+        # Suppress noisy third-party library logging to avoid user-facing noise
+        self._configure_third_party_logging()
+    
+    def _configure_third_party_logging(self) -> None:
+        """Configure third-party library logging to suppress noise in user interface."""
+        # List of third-party loggers to suppress based on common noisy libraries
+        third_party_loggers = [
+            'httpx',           # HTTP client library logs
+            'httpcore',        # HTTP core library logs
+            'urllib3',         # HTTP library logs
+            'requests',        # HTTP library logs
+            'aiohttp',         # Async HTTP library logs
+            'asyncio',         # Asyncio debug logs
+            'ollama',          # Ollama library logs (keep at WARNING+ only)
+            'websockets',      # WebSocket library logs
+            'prompt_toolkit',  # Terminal library logs
+            'pygments',        # Syntax highlighting logs
+            'rich',            # Rich text library logs
+            'markdown',        # Markdown parsing logs
+            'watchdog',        # File watching logs
+            'gitpython',       # Git library logs
+            'paramiko',        # SSH library logs
+            'cryptography',    # Crypto library logs
+            'ssl',             # SSL library logs
+            'chardet',         # Character detection logs
+        ]
+        
+        # Set WARNING level for third-party libraries to suppress INFO/DEBUG noise
+        for logger_name in third_party_loggers:
+            third_party_logger = logging.getLogger(logger_name)
+            third_party_logger.setLevel(logging.WARNING)
+        
+        # Special handling for specific loggers that are particularly noisy
+        # httpx is very verbose with HTTP request logs - set to ERROR level
+        httpx_logger = logging.getLogger('httpx')
+        httpx_logger.setLevel(logging.ERROR)
+        
+        # httpcore is also verbose with connection logs
+        httpcore_logger = logging.getLogger('httpcore')
+        httpcore_logger.setLevel(logging.ERROR)
+        
+        # Ollama library should only show warnings and errors to users
+        ollama_logger = logging.getLogger('ollama')
+        ollama_logger.setLevel(logging.WARNING)
+        
+        # Only show ABOV3 application logs and higher severity third-party logs
+        abov3_logger = logging.getLogger('abov3')
+        abov3_logger.setLevel(self.config.logging.level.upper() if hasattr(self.config.logging.level, 'upper') else logging.INFO)
+        
+        # Note: Can't use self.logger here since it's not created yet, but that's OK
+        # The debug message will be logged later when logger is available
     
     def _setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""

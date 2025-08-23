@@ -514,6 +514,9 @@ class LoggerManager:
             # Clear existing handlers
             root_logger.handlers.clear()
             
+            # Setup third-party library logging suppression FIRST
+            self._setup_third_party_logging()
+            
             # Setup handlers
             if self.config.enable_console_logging:
                 self._setup_console_handler()
@@ -534,6 +537,68 @@ class LoggerManager:
                 self._setup_remote_handler()
             
             self._initialized = True
+    
+    def _setup_third_party_logging(self) -> None:
+        """Setup third-party library logging to prevent noise in user interface."""
+        # Comprehensive list of third-party loggers that can generate noise
+        third_party_loggers = [
+            'httpx',           # HTTP client library (very verbose)
+            'httpcore',        # HTTP core library (connection logs)  
+            'urllib3',         # HTTP library
+            'requests',        # HTTP library
+            'aiohttp',         # Async HTTP library
+            'asyncio',         # Asyncio debug logs
+            'ollama',          # Ollama library logs
+            'websockets',      # WebSocket library
+            'prompt_toolkit',  # Terminal library
+            'pygments',        # Syntax highlighting
+            'rich',            # Rich text library
+            'markdown',        # Markdown parsing
+            'watchdog',        # File watching
+            'gitpython',       # Git library
+            'git',             # Git command logs
+            'paramiko',        # SSH library
+            'cryptography',    # Crypto library
+            'ssl',             # SSL library
+            'chardet',         # Character detection
+            'multipart',       # Multipart parsing
+            'h11',             # HTTP/1.1 library
+            'h2',              # HTTP/2 library
+            'hpack',           # HTTP/2 header compression
+            'hyperframe',      # HTTP/2 framing
+        ]
+        
+        # Set WARNING level for most third-party libraries
+        for logger_name in third_party_loggers:
+            third_party_logger = logging.getLogger(logger_name)
+            third_party_logger.setLevel(logging.WARNING)
+            third_party_logger.propagate = True  # Allow propagation to file handlers
+        
+        # Special handling for extremely verbose libraries
+        # httpx is particularly noisy with HTTP request details
+        httpx_logger = logging.getLogger('httpx')
+        httpx_logger.setLevel(logging.ERROR)
+        
+        # httpcore generates connection-level logs
+        httpcore_logger = logging.getLogger('httpcore')  
+        httpcore_logger.setLevel(logging.ERROR)
+        
+        # urllib3 can be verbose with connection pooling
+        urllib3_logger = logging.getLogger('urllib3')
+        urllib3_logger.setLevel(logging.WARNING)
+        urllib3_logger.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
+        
+        # Suppress asyncio debug logs which can be very verbose
+        asyncio_logger = logging.getLogger('asyncio')
+        asyncio_logger.setLevel(logging.WARNING)
+        
+        # Ollama library should show warnings and errors only
+        ollama_logger = logging.getLogger('ollama')
+        ollama_logger.setLevel(logging.WARNING)
+        
+        # Ensure ABOV3 logs are preserved at configured level
+        abov3_logger = logging.getLogger('abov3')
+        abov3_logger.setLevel(LogLevel.from_string(self.config.level))
     
     def _setup_console_handler(self) -> None:
         """Setup console logging handler."""

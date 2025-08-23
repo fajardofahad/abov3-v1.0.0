@@ -12,6 +12,7 @@ License: MIT
 """
 
 import asyncio
+import logging
 import os
 import sys
 import traceback
@@ -34,6 +35,36 @@ from .models.manager import ModelManager
 from .utils.updater import UpdateChecker
 # Import SetupWizard directly to avoid circular import
 from .utils.setup import SetupWizard
+
+
+def suppress_third_party_logging():
+    """Early configuration to suppress third-party library logging noise."""
+    # Configure root logger first to ensure proper inheritance
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # List of noisy third-party loggers to suppress immediately
+    noisy_loggers = [
+        'httpx', 'httpcore', 'urllib3', 'requests', 'aiohttp', 'asyncio',
+        'ollama', 'websockets', 'prompt_toolkit', 'pygments', 'rich',
+        'markdown', 'watchdog', 'gitpython', 'paramiko', 'cryptography',
+        'ssl', 'chardet'
+    ]
+    
+    # Set ERROR level for the noisiest loggers
+    for logger_name in ['httpx', 'httpcore']:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.ERROR)
+        logger.propagate = True  # Allow propagation to file handlers
+    
+    # Set WARNING level for other third-party loggers
+    for logger_name in noisy_loggers:
+        if logger_name not in ['httpx', 'httpcore']:
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.WARNING)
+            logger.propagate = True  # Allow propagation to file handlers
+
+# Suppress third-party logging as early as possible
+suppress_third_party_logging()
 
 
 # Global console instance for rich output

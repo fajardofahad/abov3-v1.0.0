@@ -473,7 +473,8 @@ class ABOV3REPL:
         self.console = Console(
             color_system="truecolor" if self.config.color_depth == ColorDepth.TRUE_COLOR else "256",
             force_terminal=True,
-            force_jupyter=False
+            force_jupyter=False,
+            stderr=False  # Prevent backend logs from appearing in REPL output
         )
         
         # Initialize prompt session

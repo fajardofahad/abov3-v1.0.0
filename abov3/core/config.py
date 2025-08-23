@@ -94,9 +94,9 @@ class LoggingConfig(BaseModel):
     backup_count: int = Field(default=10, description="Number of backup files")
     compress_backups: bool = Field(default=True, description="Compress rotated logs")
     
-    # Console logging
+    # Console logging - More restrictive defaults for better user experience
     enable_console_logging: bool = Field(default=True, description="Enable console logging")
-    console_level: str = Field(default="INFO", description="Console log level")
+    console_level: str = Field(default="WARNING", description="Console log level (WARNING suppresses INFO/DEBUG noise)")
     colored_output: bool = Field(default=True, description="Enable colored console output")
     
     # Structured logging
