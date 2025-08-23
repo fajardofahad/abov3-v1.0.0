@@ -2,8 +2,8 @@
 Context Manager for ABOV3 4 Ollama.
 
 This module provides the core ContextManager class that handles conversation
-context, token counting, context window management, and intelligent context
-compression strategies.
+context, token counting, context window management, intelligent context
+compression strategies, and project-aware context integration.
 """
 
 import asyncio
@@ -16,10 +16,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 from uuid import uuid4
 
 from ..config import get_config
+
+if TYPE_CHECKING:
+    from ..project.manager import ProjectManager
 
 
 logger = logging.getLogger(__name__)
@@ -31,12 +34,13 @@ class ContextEntry:
     
     id: str = field(default_factory=lambda: str(uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
-    role: str = "user"  # user, assistant, system, tool
+    role: str = "user"  # user, assistant, system, tool, project
     content: str = ""
     token_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
     priority: float = 1.0  # Higher values indicate higher importance
     compressed: bool = False
+    project_related: bool = False  # Whether this entry is project-related
     
     def __post_init__(self):
         """Calculate token count if not provided."""
@@ -117,12 +121,15 @@ class ContextManager:
     - Thread-safe operations
     - Async support for heavy operations
     - Configurable truncation strategies
+    - Project-aware context integration
+    - File content context management
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, project_manager: Optional['ProjectManager'] = None):
         """Initialize the context manager."""
         self.config = get_config()
         self._custom_config = config or {}
+        self._project_manager = project_manager
         
         # Context window settings
         self.max_tokens = self._get_setting("max_tokens", self.config.model.context_length)
@@ -133,11 +140,21 @@ class ContextManager:
         self.sliding_window_size = self._get_setting("sliding_window_size", 10)
         self.min_priority_threshold = self._get_setting("min_priority_threshold", 0.3)
         
+        # Project context settings
+        self.include_project_context = self._get_setting("include_project_context", True)
+        self.max_project_files = self._get_setting("max_project_files", 10)
+        self.project_context_priority = self._get_setting("project_context_priority", 1.5)
+        
         # State management
         self._context_window = ContextWindow(max_tokens=self.max_tokens - self.reserve_tokens)
         self._conversation_history: deque = deque(maxlen=1000)
         self._lock = threading.RLock()
         self._session_id = str(uuid4())
+        
+        # Project context management
+        self._project_context_entries: Dict[str, ContextEntry] = {}
+        self._last_project_sync = datetime.now()
+        self._project_sync_interval = timedelta(minutes=2)
         
         # Compression and summarization
         self._compression_queue: List[ContextEntry] = []
@@ -159,16 +176,18 @@ class ContextManager:
         role: str,
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
-        priority: float = 1.0
+        priority: float = 1.0,
+        project_related: bool = False
     ) -> str:
         """
         Add a message to the context.
         
         Args:
-            role: Message role (user, assistant, system, tool)
+            role: Message role (user, assistant, system, tool, project)
             content: Message content
             metadata: Optional metadata dictionary
             priority: Priority level (higher = more important)
+            project_related: Whether this message is project-related
             
         Returns:
             str: Entry ID
@@ -178,7 +197,8 @@ class ContextManager:
                 role=role,
                 content=content,
                 metadata=metadata or {},
-                priority=priority
+                priority=priority,
+                project_related=project_related
             )
             
             # Add to conversation history
@@ -590,3 +610,219 @@ class ContextManager:
                 summary = summary[:max_length-3] + "..."
             
             return summary or "Conversation in progress."
+    
+    def set_project_manager(self, project_manager: 'ProjectManager') -> None:
+        """Set or update the project manager."""
+        self._project_manager = project_manager
+        logger.info("Project manager attached to context manager")
+    
+    async def sync_project_context(self) -> None:
+        """Synchronize project context with current project state."""
+        if not self._project_manager or not self.include_project_context:
+            return
+        
+        # Check if we need to sync
+        if datetime.now() - self._last_project_sync < self._project_sync_interval:
+            return
+        
+        try:
+            # Get current project context
+            project_context = await self._project_manager.get_project_context(self.max_project_files)
+            
+            if not project_context:
+                # No project context, clear project entries
+                await self._clear_project_context()
+                return
+            
+            # Update project info entry
+            project_info = project_context.get('project', {})
+            if project_info:
+                project_summary = self._create_project_summary(project_info, project_context.get('structure', {}))
+                await self._add_or_update_project_entry(
+                    "project_info",
+                    project_summary,
+                    self.project_context_priority
+                )
+            
+            # Update file context entries
+            project_files = project_context.get('files', {})
+            for file_path, file_data in project_files.items():
+                content = self._format_file_content(file_path, file_data)
+                await self._add_or_update_project_entry(
+                    f"file_{file_path}",
+                    content,
+                    self.project_context_priority * (1.2 if file_data.get('reason') == 'modified' else 1.0)
+                )
+            
+            # Remove old file entries that are no longer relevant
+            current_file_keys = {f"file_{path}" for path in project_files.keys()}
+            old_file_keys = {key for key in self._project_context_entries.keys() 
+                           if key.startswith("file_") and key not in current_file_keys}
+            
+            for old_key in old_file_keys:
+                await self._remove_project_entry(old_key)
+            
+            self._last_project_sync = datetime.now()
+            logger.debug(f"Project context synchronized: {len(project_files)} files")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync project context: {e}")
+    
+    async def get_context_for_model(self, include_compressed: bool = True, include_project: bool = True) -> List[Dict[str, str]]:
+        """
+        Get context formatted for model consumption with project awareness.
+        
+        Args:
+            include_compressed: Whether to include compressed entries
+            include_project: Whether to include project context
+            
+        Returns:
+            List of messages formatted for the model
+        """
+        # Sync project context first
+        if include_project:
+            await self.sync_project_context()
+        
+        with self._lock:
+            messages = []
+            
+            # Add compressed entries first if requested
+            if include_compressed:
+                for entry in self._context_window.compressed_entries:
+                    messages.append({
+                        "role": entry.role,
+                        "content": entry.content
+                    })
+            
+            # Add project context entries with high priority
+            if include_project:
+                project_entries = sorted(
+                    self._project_context_entries.values(),
+                    key=lambda e: e.priority,
+                    reverse=True
+                )
+                for entry in project_entries:
+                    messages.append({
+                        "role": entry.role,
+                        "content": entry.content
+                    })
+            
+            # Add current context window entries
+            for entry in self._context_window.entries:
+                messages.append({
+                    "role": entry.role,
+                    "content": entry.content
+                })
+            
+            return messages
+    
+    def _create_project_summary(self, project_info: Dict[str, Any], structure: Dict[str, Any]) -> str:
+        """Create a summary of the current project."""
+        summary_parts = []
+        
+        # Basic project info
+        summary_parts.append(f"Current Project: {project_info.get('name', 'Unknown')}")
+        summary_parts.append(f"Type: {project_info.get('type', 'Unknown')}")
+        
+        # Project structure
+        if structure:
+            languages = structure.get('languages', [])
+            if languages:
+                summary_parts.append(f"Languages: {', '.join(languages)}")
+            
+            frameworks = structure.get('frameworks', [])
+            if frameworks:
+                summary_parts.append(f"Frameworks: {', '.join(frameworks)}")
+        
+        # Statistics
+        total_files = project_info.get('total_files', 0)
+        modified_files = project_info.get('modified_files', 0)
+        if total_files > 0:
+            summary_parts.append(f"Files: {total_files} total")
+            if modified_files > 0:
+                summary_parts.append(f"Modified: {modified_files} files")
+        
+        return "\n".join(summary_parts)
+    
+    def _format_file_content(self, file_path: str, file_data: Dict[str, Any]) -> str:
+        """Format file content for context inclusion."""
+        lines = [f"File: {file_path}"]
+        
+        # Add metadata
+        if file_data.get('reason') == 'modified':
+            lines.append("Status: Recently modified")
+        elif file_data.get('reason') == 'accessed':
+            lines.append("Status: Recently accessed")
+        
+        extension = file_data.get('extension', '')
+        if extension:
+            lines.append(f"Type: {extension}")
+        
+        # Add content
+        content = file_data.get('content', '')
+        if content:
+            lines.append("Content:")
+            lines.append("```" + extension.lstrip('.'))
+            lines.append(content)
+            lines.append("```")
+        
+        return "\n".join(lines)
+    
+    async def _add_or_update_project_entry(self, key: str, content: str, priority: float) -> None:
+        """Add or update a project context entry."""
+        entry = ContextEntry(
+            role="project",
+            content=content,
+            priority=priority,
+            project_related=True,
+            metadata={"project_key": key}
+        )
+        
+        self._project_context_entries[key] = entry
+        
+        # Also update search index
+        self._update_search_index(entry)
+    
+    async def _remove_project_entry(self, key: str) -> None:
+        """Remove a project context entry."""
+        if key in self._project_context_entries:
+            entry = self._project_context_entries.pop(key)
+            
+            # Remove from search index
+            if entry.id in self._keyword_cache:
+                keywords = self._keyword_cache[entry.id]
+                for keyword in keywords:
+                    if keyword in self._search_index:
+                        self._search_index[keyword].discard(entry.id)
+                del self._keyword_cache[entry.id]
+    
+    async def _clear_project_context(self) -> None:
+        """Clear all project context entries."""
+        for key in list(self._project_context_entries.keys()):
+            await self._remove_project_entry(key)
+        
+        logger.debug("Project context cleared")
+    
+    def get_project_context_stats(self) -> Dict[str, Any]:
+        """Get statistics about project context."""
+        if not self._project_manager:
+            return {"project_manager": False}
+        
+        stats = {
+            "project_manager": True,
+            "project_entries": len(self._project_context_entries),
+            "last_sync": self._last_project_sync.isoformat(),
+            "include_project_context": self.include_project_context,
+            "max_project_files": self.max_project_files,
+        }
+        
+        # Add project manager stats if available
+        try:
+            import asyncio
+            if hasattr(asyncio, 'create_task'):
+                # We can't await here, so just indicate project is available
+                stats["has_active_project"] = self._project_manager.state.value == "active"
+        except Exception:
+            stats["has_active_project"] = False
+        
+        return stats

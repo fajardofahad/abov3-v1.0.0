@@ -614,3 +614,33 @@ class SecurityManager:
                 issues.extend(code_issues)
         
         return len(issues) == 0, issues
+    
+    def validate_path(self, path: str) -> bool:
+        """Validate a file path for security and accessibility."""
+        try:
+            from pathlib import Path
+            
+            # Convert to Path object
+            path_obj = Path(path).resolve()
+            
+            # Check for path traversal attempts
+            path_str = str(path_obj)
+            if '..' in path_str or path_str != str(Path(path_str).resolve()):
+                return False
+            
+            # Check if path exists and is accessible
+            if not path_obj.exists():
+                return False
+                
+            # Check if it's a directory
+            if not path_obj.is_dir():
+                return False
+                
+            # Check read permissions
+            if not os.access(str(path_obj), os.R_OK):
+                return False
+                
+            return True
+        except Exception as e:
+            security_logger.warning(f"Path validation failed for {path}: {e}")
+            return False

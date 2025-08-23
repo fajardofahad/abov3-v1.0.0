@@ -57,6 +57,10 @@ from rich.traceback import Traceback
 from .completers import ContextAwareCompleter, MultiCompleter
 from .formatters import OutputFormatter, StreamingFormatter
 from .keybindings import create_keybindings, KeyBindingMode
+from ...utils.project_errors import (
+    ABOV3ProjectError, ProjectNotSelectedException, FileOperationError,
+    handle_project_error, format_error_for_user
+)
 
 # Windows compatibility imports
 if sys.platform == "win32":
@@ -157,6 +161,15 @@ class CommandProcessor:
         '/import': 'Import session from file',
         '/status': 'Show system status',
         '/models': 'List available AI models',
+        # Project commands
+        '/project': 'Select/change working directory',
+        '/files': 'List files in current project directory',
+        '/read': 'Read and display file contents',
+        '/edit': 'Open file for editing',
+        '/save_file': 'Save content to file',
+        '/search': 'Search for text across project files',
+        '/tree': 'Show project directory tree structure',
+        '/analyze': 'Analyze file or project structure',
     }
     
     def __init__(self, repl: 'ABOV3REPL'):
@@ -183,6 +196,15 @@ class CommandProcessor:
             '/import': self._cmd_import,
             '/status': self._cmd_status,
             '/models': self._cmd_models,
+            # Project command handlers
+            '/project': self._cmd_project,
+            '/files': self._cmd_files,
+            '/read': self._cmd_read,
+            '/edit': self._cmd_edit,
+            '/save_file': self._cmd_save_file,
+            '/search': self._cmd_search,
+            '/tree': self._cmd_tree,
+            '/analyze': self._cmd_analyze,
         }
     
     def is_command(self, text: str) -> bool:
@@ -447,6 +469,341 @@ class CommandProcessor:
                 return f"Error listing models: {e}"
         else:
             return "Model manager not available"
+    
+    # Project command handlers
+    async def _cmd_project(self, args: str) -> str:
+        """Select/change working directory."""
+        if not args.strip():
+            # Show current project info
+            project_manager = getattr(self.repl, 'project_manager', None)
+            if project_manager:
+                try:
+                    project_info = await project_manager.get_project_info()
+                    if project_info:
+                        table = Table(title="Current Project", show_header=True)
+                        table.add_column("Property", style="cyan")
+                        table.add_column("Value", style="white")
+                        
+                        for key, value in project_info.items():
+                            if isinstance(value, list):
+                                value = ", ".join(map(str, value))
+                            table.add_row(key.replace("_", " ").title(), str(value))
+                        
+                        self.repl.console.print(table)
+                        return ""
+                    else:
+                        return "No project currently selected. Use '/project <path>' to select a project."
+                except Exception as e:
+                    return f"Error getting project info: {e}"
+            else:
+                return "Project manager not available"
+        
+        # Select new project
+        project_path = args.strip()
+        project_manager = getattr(self.repl, 'project_manager', None)
+        
+        if not project_manager:
+            return "Project manager not available"
+        
+        try:
+            success = await project_manager.select_project(project_path)
+            if success:
+                # Update REPL prompt to show project
+                project_info = await project_manager.get_project_info()
+                if project_info:
+                    self.repl.config.prompt_text = f"ABOV3({project_info['name']})> "
+                return f"Project selected: {project_path}"
+            else:
+                return f"Failed to select project: {project_path}"
+        except ABOV3ProjectError as e:
+            # Handle project-specific errors with user-friendly messages
+            error_info = handle_project_error(e, {"command": "/project", "path": project_path})
+            return format_error_for_user(error_info)
+        except Exception as e:
+            # Handle unexpected errors
+            error_info = handle_project_error(e, {"command": "/project", "path": project_path})
+            return format_error_for_user(error_info)
+    
+    async def _cmd_files(self, args: str) -> str:
+        """List files in current project directory."""
+        project_manager = getattr(self.repl, 'project_manager', None)
+        if not project_manager:
+            return "No project selected. Use '/project <path>' to select a project."
+        
+        # Parse arguments
+        parts = args.split() if args.strip() else []
+        pattern = parts[0] if parts else "*"
+        max_results = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 50
+        
+        try:
+            files = await project_manager.list_files(
+                pattern=pattern,
+                max_results=max_results
+            )
+            
+            if not files:
+                return f"No files found matching pattern: {pattern}"
+            
+            table = Table(title=f"Project Files ({len(files)} found)", show_header=True)
+            table.add_column("Path", style="cyan", no_wrap=False)
+            table.add_column("Size", style="green", justify="right")
+            table.add_column("Modified", style="yellow")
+            table.add_column("Type", style="magenta")
+            table.add_column("Status", style="red")
+            
+            for file_info in files:
+                size_str = self._format_file_size(file_info['size'])
+                modified_str = file_info['modified'].split('T')[0]  # Just date
+                status = "Modified" if file_info.get('is_modified') else ""
+                
+                table.add_row(
+                    file_info['path'],
+                    size_str,
+                    modified_str,
+                    file_info['type'],
+                    status
+                )
+            
+            self.repl.console.print(table)
+            return ""
+            
+        except Exception as e:
+            return f"Error listing files: {e}"
+    
+    async def _cmd_read(self, args: str) -> str:
+        """Read and display file contents."""
+        if not args.strip():
+            return "Usage: /read <file_path>"
+        
+        project_manager = getattr(self.repl, 'project_manager', None)
+        if not project_manager:
+            return "No project selected. Use '/project <path>' to select a project."
+        
+        file_path = args.strip()
+        
+        try:
+            content = await project_manager.read_file(file_path)
+            
+            # Detect file type for syntax highlighting
+            file_ext = os.path.splitext(file_path)[1].lower()
+            language_map = {
+                '.py': 'python',
+                '.js': 'javascript',
+                '.ts': 'typescript',
+                '.html': 'html',
+                '.css': 'css',
+                '.json': 'json',
+                '.yaml': 'yaml',
+                '.yml': 'yaml',
+                '.md': 'markdown',
+                '.sh': 'bash',
+                '.sql': 'sql'
+            }
+            
+            language = language_map.get(file_ext, 'text')
+            
+            # Create panel with syntax highlighting
+            syntax = Syntax(content, language, theme=self.repl.config.theme, line_numbers=True)
+            panel = Panel(
+                syntax,
+                title=f"File: {file_path}",
+                border_style="cyan",
+                expand=False
+            )
+            
+            self.repl.console.print(panel)
+            return ""
+            
+        except Exception as e:
+            return f"Error reading file: {e}"
+    
+    async def _cmd_edit(self, args: str) -> str:
+        """Open file for editing (placeholder - would integrate with external editor)."""
+        if not args.strip():
+            return "Usage: /edit <file_path>"
+        
+        file_path = args.strip()
+        
+        # For now, just read the file and suggest using /save_file to write changes
+        try:
+            result = await self._cmd_read(file_path)
+            if result:
+                return result
+            
+            return f"\nFile displayed above. To save changes, use: /save_file {file_path} <content>\nOr use your preferred editor to modify the file."
+            
+        except Exception as e:
+            return f"Error accessing file: {e}"
+    
+    async def _cmd_save_file(self, args: str) -> str:
+        """Save content to file."""
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            return "Usage: /save_file <file_path> <content>"
+        
+        file_path = parts[0]
+        content = parts[1]
+        
+        project_manager = getattr(self.repl, 'project_manager', None)
+        if not project_manager:
+            return "No project selected. Use '/project <path>' to select a project."
+        
+        try:
+            await project_manager.write_file(file_path, content)
+            return f"File saved: {file_path}"
+            
+        except Exception as e:
+            return f"Error saving file: {e}"
+    
+    async def _cmd_search(self, args: str) -> str:
+        """Search for text across project files."""
+        if not args.strip():
+            return "Usage: /search <query> [file_pattern] [max_results]"
+        
+        project_manager = getattr(self.repl, 'project_manager', None)
+        if not project_manager:
+            return "No project selected. Use '/project <path>' to select a project."
+        
+        # Parse arguments
+        parts = args.split()
+        query = parts[0]
+        file_pattern = parts[1] if len(parts) > 1 else "*"
+        max_results = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 20
+        
+        try:
+            results = await project_manager.search_files(
+                query=query,
+                file_pattern=file_pattern,
+                max_results=max_results
+            )
+            
+            if not results:
+                return f"No matches found for: {query}"
+            
+            # Display search results
+            for result in results:
+                file_panel = Panel(
+                    f"File: {result['file_path']}\nMatches: {result['total_matches']}\n",
+                    title="Search Result",
+                    border_style="green"
+                )
+                self.repl.console.print(file_panel)
+                
+                # Show first few matches
+                for match in result['matches'][:3]:  # Show max 3 matches per file
+                    match_text = Text()
+                    match_text.append(f"Line {match['line_number']}: ", style="bold yellow")
+                    match_text.append(match['line_content'])
+                    self.repl.console.print(match_text)
+                
+                if result['total_matches'] > 3:
+                    self.repl.console.print(f"... and {result['total_matches'] - 3} more matches\n")
+            
+            return ""
+            
+        except Exception as e:
+            return f"Error searching files: {e}"
+    
+    async def _cmd_tree(self, args: str) -> str:
+        """Show project directory tree structure."""
+        project_manager = getattr(self.repl, 'project_manager', None)
+        if not project_manager:
+            return "No project selected. Use '/project <path>' to select a project."
+        
+        # Parse max depth
+        max_depth = 3
+        if args.strip() and args.strip().isdigit():
+            max_depth = int(args.strip())
+        
+        try:
+            tree_data = await project_manager.get_project_tree(max_depth=max_depth)
+            
+            # Display tree structure
+            self._display_tree(tree_data, "", is_last=True)
+            return ""
+            
+        except Exception as e:
+            return f"Error getting project tree: {e}"
+    
+    async def _cmd_analyze(self, args: str) -> str:
+        """Analyze file or project structure."""
+        project_manager = getattr(self.repl, 'project_manager', None)
+        if not project_manager:
+            return "No project selected. Use '/project <path>' to select a project."
+        
+        if not args.strip():
+            # Analyze project
+            try:
+                project_info = await project_manager.get_project_info()
+                if not project_info:
+                    return "No project information available"
+                
+                # Create analysis panel
+                analysis_text = []
+                analysis_text.append(f"Project: {project_info['name']}")
+                analysis_text.append(f"Type: {project_info['type']}")
+                analysis_text.append(f"Total Files: {project_info['total_files']}")
+                analysis_text.append(f"Total Size: {self._format_file_size(project_info['total_size'])}")
+                
+                if project_info['languages']:
+                    analysis_text.append(f"Languages: {', '.join(project_info['languages'])}")
+                
+                if project_info['frameworks']:
+                    analysis_text.append(f"Frameworks: {', '.join(project_info['frameworks'])}")
+                
+                if project_info['modified_files'] > 0:
+                    analysis_text.append(f"Modified Files: {project_info['modified_files']}")
+                
+                panel = Panel(
+                    "\n".join(analysis_text),
+                    title="Project Analysis",
+                    border_style="cyan"
+                )
+                self.repl.console.print(panel)
+                return ""
+                
+            except Exception as e:
+                return f"Error analyzing project: {e}"
+        else:
+            # Analyze specific file
+            file_path = args.strip()
+            return f"File analysis not yet implemented for: {file_path}"
+    
+    def _format_file_size(self, size_bytes: int) -> str:
+        """Format file size in human-readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f}{unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f}TB"
+    
+    def _display_tree(self, node: Dict[str, Any], prefix: str, is_last: bool) -> None:
+        """Display tree structure recursively."""
+        if node is None:
+            return
+        
+        # Display current node
+        connector = "└── " if is_last else "├── "
+        name = node.get('name', 'Unknown')
+        
+        if node.get('type') == 'directory':
+            name = f"[bold blue]{name}/[/bold blue]"
+        elif node.get('type') == 'file':
+            name = f"[green]{name}[/green]"
+            if node.get('is_modified'):
+                name += " [red]*[/red]"
+        
+        self.repl.console.print(f"{prefix}{connector}{name}")
+        
+        # Display children
+        children = node.get('children', {})
+        if children:
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            child_items = list(children.items())
+            
+            for i, (child_name, child_node) in enumerate(child_items):
+                is_last_child = i == len(child_items) - 1
+                self._display_tree(child_node, child_prefix, is_last_child)
 
 
 class ABOV3REPL:
@@ -455,7 +812,8 @@ class ABOV3REPL:
     def __init__(
         self,
         config: Optional[REPLConfig] = None,
-        process_callback: Optional[Callable[[str], Union[str, Any]]] = None
+        process_callback: Optional[Callable[[str], Union[str, Any]]] = None,
+        project_manager=None
     ):
         """
         Initialize the ABOV3 REPL.
@@ -463,9 +821,11 @@ class ABOV3REPL:
         Args:
             config: REPL configuration
             process_callback: Callback function to process user input
+            project_manager: Project manager instance for file operations
         """
         self.config = config or REPLConfig()
         self.process_callback = process_callback
+        self.project_manager = project_manager
         self.running = False
         self.debug_mode = False
         

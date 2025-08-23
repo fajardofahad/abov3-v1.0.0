@@ -76,6 +76,49 @@ class PluginConfig(BaseModel):
     auto_load: bool = Field(default=True, description="Auto-load plugins on startup")
 
 
+class ProjectConfig(BaseModel):
+    """Configuration for project management."""
+    
+    # File operations
+    max_file_size: int = Field(default=10 * 1024 * 1024, description="Maximum file size for operations (10MB)")
+    max_files_in_context: int = Field(default=50, description="Maximum files to include in AI context")
+    auto_watch_changes: bool = Field(default=True, description="Automatically watch project files for changes")
+    
+    # Context integration
+    include_project_context: bool = Field(default=True, description="Include project context in AI conversations")
+    project_context_priority: float = Field(default=1.5, description="Priority multiplier for project context")
+    context_sync_interval: int = Field(default=120, description="Project context sync interval in seconds")
+    
+    # File patterns
+    include_patterns: List[str] = Field(default_factory=lambda: [
+        "*.py", "*.js", "*.ts", "*.html", "*.css", "*.json", "*.md", "*.txt", "*.yml", "*.yaml"
+    ], description="File patterns to include in project operations")
+    
+    exclude_patterns: List[str] = Field(default_factory=lambda: [
+        "node_modules/*", ".git/*", "__pycache__/*", "*.pyc", "*.pyo", "*.pyd",
+        ".venv/*", "venv/*", "env/*", "build/*", "dist/*", "target/*", ".DS_Store"
+    ], description="File patterns to exclude from project operations")
+    
+    search_patterns: List[str] = Field(default_factory=lambda: [
+        "*.py", "*.js", "*.ts", "*.java", "*.cpp", "*.c", "*.h", "*.go", "*.rs",
+        "*.html", "*.css", "*.md", "*.txt", "*.json", "*.yml", "*.yaml"
+    ], description="File patterns for search operations")
+    
+    # Recent projects
+    remember_recent_projects: bool = Field(default=True, description="Remember recently opened projects")
+    max_recent_projects: int = Field(default=10, description="Maximum number of recent projects to remember")
+    recent_projects: List[str] = Field(default_factory=list, description="List of recent project paths")
+    
+    # Auto-analysis
+    auto_analyze_projects: bool = Field(default=True, description="Automatically analyze project structure")
+    analysis_cache_duration: int = Field(default=3600, description="Project analysis cache duration in seconds")
+    
+    # Integration settings
+    enable_code_intelligence: bool = Field(default=True, description="Enable code intelligence features")
+    enable_file_watching: bool = Field(default=True, description="Enable real-time file watching")
+    enable_smart_suggestions: bool = Field(default=True, description="Enable smart file and code suggestions")
+
+
 class LoggingConfig(BaseModel):
     """Enhanced configuration for logging system."""
     
@@ -148,6 +191,7 @@ class Config(BaseModel):
     ui: UIConfig = Field(default_factory=UIConfig)
     history: HistoryConfig = Field(default_factory=HistoryConfig)
     plugins: PluginConfig = Field(default_factory=PluginConfig)
+    project: ProjectConfig = Field(default_factory=ProjectConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     
     # Application settings
@@ -262,6 +306,11 @@ class Config(BaseModel):
             "ABOV3_DEBUG": ("debug",),
             "ABOV3_LOG_LEVEL": ("logging", "level"),
             "ABOV3_LOG_FILE": ("logging", "file_path"),
+            # Project settings
+            "ABOV3_MAX_FILE_SIZE": ("project", "max_file_size"),
+            "ABOV3_AUTO_WATCH_CHANGES": ("project", "auto_watch_changes"),
+            "ABOV3_INCLUDE_PROJECT_CONTEXT": ("project", "include_project_context"),
+            "ABOV3_MAX_FILES_IN_CONTEXT": ("project", "max_files_in_context"),
         }
 
         for env_var, key_path in env_mappings.items():
